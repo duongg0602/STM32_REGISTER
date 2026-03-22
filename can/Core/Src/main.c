@@ -42,84 +42,86 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-void spi_active_slave(){
-	uint32_t *ODR = (uint32_t *)(0x40010800 + 0x0c);
-	//set low for PA4
-	*ODR &= ~ (1 << 4);
-}
-void spi_inactive_slave(){
-	uint32_t *ODR = (uint32_t *)(0x40010800 + 0x0c);
-	//set high for PA4
-	*ODR |= (1 << 4);
-}
-void spi_init(){
+void Can_init(){
+	__HAL_RCC_CAN1_CLK_ENABLE();
 	__HAL_RCC_GPIOA_CLK_ENABLE();
-	uint32_t *CRL = (uint32_t*)(0x40010800);
-	*CRL &= ~(0b11 << 18); //set output pushpull for PA4
-	*CRL &= ~(0b11 << 22);
-	*CRL &= ~(0b11 << 26);
-	*CRL &= ~(0b11 << 30);
-	*CRL |= (0b10 << 22) | (0b10 << 30); //Set PA5 SCK, PA7 MOSI
-	*CRL |= (0b10 << 26); //Set input pullup PA6
-	uint32_t * AFIO_MAPR = (uint32_t *)(0x40010000 + 0x04);
-	*AFIO_MAPR &= ~(1 << 0); //set PA4 CSS, PA5 SCK, PA6 MISO, PA7 MOSI in AFIO
-	__HAL_RCC_SPI1_CLK_ENABLE();
-	uint32_t * SPI1_CR1 =(uint32_t *)(0x40013000);
-	*SPI1_CR1 |= (1 << 2); //set master mode
-	*SPI1_CR1 |= (0b100 << 3);
-	*SPI1_CR1 |= (1 << 8) | (1 << 9); //SS pin controlled by gpio
-	*SPI1_CR1 |= (1 << 6); //enable pheripheral
-	spi_inactive_slave();
+	uint32_t* CRH = (uint32_t *)(0x40010800 + 0x04);
+	uint32_t* AFIO_MAPR = (uint32_t *)(0x40010000 + 0x04);
+	uint32_t* CAN_MCR = (uint32_t *)(0x40006400);
+	uint32_t* CAN_MSR = (uint32_t *)(0x40006400 + 0x04);
+	//PA11 CAN RX, PA12 CAN TX
+	*AFIO_MAPR &= ~(0b11 << 13); //set PA11: CAN Rx, PA12 CAN Tx
+	*CRH &= ~(0b11 << 14);
+	*CRH &= ~(0b11 << 18);
+	*CRH |= (0b10 << 14); //set PA11 input pull-up
+	*CRH |= (0b10 << 18); //set PA12 AF
+
+	*CAN_MCR |= (1 << 0); //set bit INRQ, into the initialization mode
+	while((*CAN_MSR >> 0 & 1) == 0); //wait until the INAK bit is set
+
+	//init CAN controller
+	//set baudrate = 500kbps
+	uint32_t* CAN_BTR = (uint32_t *)(0x40006400 + 0x1c);
+	*CAN_BTR &= ~(0b1111 << 16);
+	*CAN_BTR &= ~(0b111 << 20);
+	*CAN_BTR &= ~(0b11 << 24);
+	*CAN_BTR &= ~(1 << 0); 		//set prescaler = 1
+	*CAN_BTR |= (0b1011 << 16); //set TS1 = 12
+	*CAN_BTR |= (0b010 << 20); //set TS2 = 3
+	//set up CAN options
+	*CAN_MCR &= ~(0b1 << 2); // Priority driven by the identifier of the message
+	*CAN_MCR |= (1 << 4); 	 // a message is sent only once (No automatic retransmission)
+	*CAN_MCR |= (1 << 5);	 // sleep mode left automatic (automatic wake up)
+
+	uint32_t* CAN_FMR = (uint32_t *)(0x40006400 + 0x200);
+	*CAN_FMR &= ~(1 << 0); //active filters mode
+	//filters mode MASK
+	uint32_t* CAN_FS1R = (uint32_t *)(0x40006400 + 0x20c);
+	*CAN_FS1R |= (1 << 0); //config 32 bit
+	//FIFO 0
+	uint32_t* CAN_FA1R = (uint32_t *)(0x40006400 + 0x21c);
+	*CAN_FA1R |= (1 << 0); //Filter active
+
+	//get into normal mode
+	*CAN_MCR &= ~(1 << 0); //clear bit INRQ
+	while(((*CAN_MSR >> 0) & 1) != 0); //wait for hardware by clearing the INAK bit
+
+	//config loopback
+	*CAN_BTR |= (0b1 << 30);
+	//set up interrupt
+	uint32_t* CAN_IER = (uint32_t *)(0x40006400 + 0x14);
+	*CAN_IER |= (1 << 1);
+	uint32_t* NVIC_ISER0 = (uint32_t *)(0xE000E100);
+	*NVIC_ISER0 |= (1 << 21);
 
 }
 
-char spi_read_data(char reg){
-	spi_active_slave();
-	uint32_t *	SPI_SR = (uint32_t *)(0x40013000 + 0x08);
-	uint32_t *	SPI_DR = (uint32_t *)(0x40013000 + 0x0c);
-	//send reg to slave - WRITE reg value to DR of SPI1
-	while(((*SPI_SR >> 1) & 1) != 1); // Wait until the TX buffer empty
-	*SPI_DR = reg;
-	while(((*SPI_SR >> 1) & 1) == 1); //Wait until the data transfered to the TX buffer
-	while(((*SPI_SR >> 0) & 1) != 1); //Wait RXNE not empty (has received data)
-	while(((*SPI_SR >> 7) & 1) == 1); //Wait until SPI not busy
-	//Clear spam data - read data from DR
-	uint8_t temp = *SPI_DR;
-	//send clock for slave
-	while(((*SPI_SR >> 1) & 1) != 1); // Wait until the TX buffer empty
-	*SPI_DR = 0xFF;
-	while(((*SPI_SR >> 1) & 1) == 1); //Wait until the data transfered to the TX buffer
-	while(((*SPI_SR >> 0) & 1) != 1); //Wait RXNE not empty (has received data)
-	while(((*SPI_SR >> 7) & 1) == 1); //Wait until SPI not busy
-	//Read data from DR
-	temp = *SPI_DR;
-	//inactive slave - Set PA4 to HIGH
-	spi_inactive_slave();
-	return temp;
+void Can_transmit(uint32_t ID, uint8_t data){
+	uint32_t* CAN_TI0R = (uint32_t *)(0x40006400 + 0x180); //first mailbox
+
+	while(((*CAN_TI0R >> 26 ) & 1) == 0); //wait until there is no request transmit for mailbox 0
+	*CAN_TI0R |= (ID << 21); //set id
+	//set up DLC
+	uint32_t* CAN_TDT0R = (uint32_t *)(0x40006400 + 0x184);
+	*CAN_TDT0R |= (0b0001 << 0); //set 1 byte data
+	//write data
+	uint32_t* CAN_TDL0R = (uint32_t *)(0x40006400 + 0x188);
+	*CAN_TDL0R |= (data << 0);
+	*CAN_TI0R |= (1 << 0);
 
 }
 
-void spi_write_data(char reg, char data){
-	spi_active_slave();
-	uint32_t *	SPI_SR = (uint32_t *)(0x40013000 + 0x08);
-	uint32_t *	SPI_DR = (uint32_t *)(0x40013000 + 0x0c);
-
-	//send reg to slave - WRITE reg value to DR of SPI1
-	while(((*SPI_SR >> 1) & 1) != 1); // Wait until the TX buffer empty
-	*SPI_DR = reg;
-	while(((*SPI_SR >> 1) & 1) == 1); //Wait until the data transfered to the TX buffer
-	while(((*SPI_SR >> 0) & 1) != 1); //Wait RXNE not empty (has received data)
-	while(((*SPI_SR >> 7) & 1) == 1); //Wait until SPI not busy
-	uint8_t t = *SPI_DR;
-	//send clock for slave
-	while(((*SPI_SR >> 1) & 1) != 1); // Wait until the TX buffer empty
-	*SPI_DR = data;
-	while(((*SPI_SR >> 1) & 1) == 1); //Wait until the data transfered to the TX buffer
-	while(((*SPI_SR >> 0) & 1) != 1); //Wait RXNE not empty (has received data)
-	//Read data from DR
-	t = *SPI_DR;
-	//inactive slave - Set PA4 to HIGH
-	spi_inactive_slave();
+char Can_receive(){
+	uint32_t* CAN_RF0R = (uint32_t *)(0x40006400 + 0x0c);
+	uint32_t* CAN_RDL0R = (uint32_t *)(0x40006400 + 0x1b8);
+	//check mailbox
+	if((*CAN_RF0R & 0b11) == 0){
+		return 0;
+	}
+	char data = (char)(*CAN_RDL0R & 0xff); //read data
+	//release FIFO
+	*CAN_RF0R |= (1 << 5);
+	return data;
 }
 /* USER CODE END PV */
 
@@ -162,15 +164,13 @@ int main(void)
 
   /* Initialize all configured peripherals */
   /* USER CODE BEGIN 2 */
-  spi_init();
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  spi_read_data(0x80);
-	  HAL_Delay(1000);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
